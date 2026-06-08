@@ -54,8 +54,11 @@ class Deck:
         return len(self.cards)
     
     def needs_shuffle(self):
-        # Reshuffle after 300 cards have been dealt
-        return len(self.dealt_cards) >= 300
+        # Reshuffle after 350 cards have been dealt (84% penetration on
+        # an 8-deck shoe). 72% pen leaves few high counts on the table;
+        # 84% is a realistic "deep" penetration for hand-shuffled games
+        # and lets counters express more of their edge.
+        return len(self.dealt_cards) >= 350
     
     def get_card_count(self):
         # Returns dictionary with count of each card value left in the deck
@@ -73,6 +76,14 @@ class Hand:
         self.is_blackjack = False
         self.can_split = False
         self.is_splitted = False
+        # True if this hand was created (or had its companion created) by
+        # splitting a pair of Aces. Casinos universally restrict split aces
+        # to exactly one card -- no hit, no double, no re-split. The env
+        # enforces this by forcing STAND on any action against such a hand.
+        self.is_split_aces = False
+        # True if the player surrendered this hand. They forfeit half the
+        # bet and play ends for this hand.
+        self.surrendered = False
         
     def add_card(self, card):
         self.cards.append(card)
@@ -82,26 +93,29 @@ class Hand:
     def _calculate_value(self):
         self.value = 0
         self.aces = 0
-        
+
         for card in self.cards:
             if card.value == 'A':
                 self.aces += 1
             self.value += card.get_value()
-        
-        # Adjust for aces
-        self.is_soft = False
-        if self.aces > 0 and self.value > 21:
-            self.is_soft = True
-            for _ in range(self.aces):
-                if self.value > 21:
-                    self.value -= 10
-                    self.aces -= 1
-                else:
-                    break
-        
-        # Check for blackjack
-        if len(self.cards) == 2 and self.value == 21 and not self.is_splitted:
-            self.is_blackjack = True
+
+        # Downgrade aces from 11 to 1 as needed to avoid busting.
+        while self.aces > 0 and self.value > 21:
+            self.value -= 10
+            self.aces -= 1
+
+        # A hand is "soft" if there is still an Ace counted as 11.
+        self.is_soft = self.aces > 0
+
+        # Natural blackjack: A-T or T-A in the first two cards of an
+        # un-split hand. Recompute every time so that adding a third card
+        # (e.g. via DOUBLE on a natural 21) un-sets the flag -- doubling
+        # a blackjack must NOT keep paying 3:2.
+        self.is_blackjack = (
+            len(self.cards) == 2
+            and self.value == 21
+            and not self.is_splitted
+        )
     
     def _check_split(self):
         if len(self.cards) == 2 and self.cards[0].value == self.cards[1].value:
@@ -217,27 +231,51 @@ class BlackjackEnv:
         if self.deck.needs_shuffle():
             self.deck.reset()
             self.counter.reset()
-        
+
         self.player_hands = [Hand()]
         self.dealer_hand = Hand()
         self.bets = [self.counter.get_bet_amount(self.min_bet, self.max_bet)]
         self.current_hand_index = 0
         self.game_over = False
-        
+        # US peek tracking. dealer_hole_dealt is True if reset already dealt
+        # the hole card (i.e., upcard was 10/A so we peeked). dealer_pre_bj
+        # is True if the peek revealed a natural; the first step() call
+        # will then resolve the round before any player action.
+        self.dealer_hole_dealt = False
+        self.dealer_pre_bj = False
+
         # Deal initial cards
         for _ in range(2):
             for hand in self.player_hands:
                 card = self.deck.deal()
                 hand.add_card(card)
                 self.counter.update_count(card)
-                
+
             if _ == 0:  # Only deal one card to dealer initially (the visible card)
                 card = self.deck.deal()
                 self.dealer_hand.add_card(card)
                 self.counter.update_count(card)
-        
+
         # Update decks remaining
         self.counter.update_decks_remaining(self.deck.cards_remaining())
+
+        # ---- US peek for blackjack ----
+        # If the dealer's upcard is a ten-valued card or an Ace, deal the
+        # hole face-down and check whether the dealer has a natural. If
+        # the dealer has BJ, the round ends BEFORE the player acts (so the
+        # player can't lose double/split bets to a dealer natural). The
+        # hole card is removed from the deck but only added to the running
+        # count once it's revealed (immediately on BJ; otherwise when the
+        # dealer plays out at end of round).
+        upcard_val = self.dealer_hand.cards[0].get_value()
+        if upcard_val in (10, 11):
+            hole = self.deck.deal()
+            self.dealer_hand.add_card(hole)
+            self.dealer_hole_dealt = True
+            self.counter.update_decks_remaining(self.deck.cards_remaining())
+            if self.dealer_hand.is_blackjack:
+                self.counter.update_count(hole)
+                self.dealer_pre_bj = True
         
         # Get initial state
         return self._get_state()
@@ -284,152 +322,168 @@ class BlackjackEnv:
     
     def step(self, action):
         """
-        Take action and return new state, reward, and done flag
-        Actions: 0 = hit, 1 = stand, 2 = double, 3 = split
+        Take action; return (state, reward, done).
+        Actions: 0 = hit, 1 = stand, 2 = double, 3 = split, 4 = surrender
+
+        Accounting rule: NO intermediate bankroll/reward updates. We only
+        compute the bankroll change and per-hand reward at the very end of
+        the play (when current_hand_index passes the last player hand),
+        via _calculate_rewards. This avoids the double-debit-on-bust bug
+        that the old logic had with split hands.
         """
         if self.game_over:
             return self._get_state(), 0, True
-        
+
+        # US peek caught a dealer natural during reset. End the round on
+        # the very first step call -- the player doesn't get to act.
+        if self.dealer_pre_bj:
+            self.game_over = True
+            reward = self._calculate_rewards()
+            self.bankroll += reward
+            self.num_hands_played += 1
+            return self._get_state(), reward, True
+
         if self.current_hand_index >= len(self.player_hands):
             return self._get_state(), 0, True
-        
+
         current_hand = self.player_hands[self.current_hand_index]
-        current_bet = self.bets[self.current_hand_index]
-        reward = 0
-        done = False
-        
-        # Process player action
+        advance_to_next = False  # set True if we're done with the current hand
+
+        # Casino rule: split aces get exactly one card. No hit, no double,
+        # no re-split. Force STAND on any action against a split-aces hand.
+        if current_hand.is_split_aces:
+            action = 1
+
         if action == 0:  # Hit
             card = self.deck.deal()
             current_hand.add_card(card)
             self.counter.update_count(card)
-            
             if current_hand.is_busted():
-                reward = -current_bet
-                self.bankroll -= current_bet
-                self.current_hand_index += 1
-                
-                if self.current_hand_index >= len(self.player_hands):
-                    done = True
-                    self.game_over = True
-                    self._record_result("Bust", reward)
-        
+                advance_to_next = True
+
         elif action == 1:  # Stand
-            self.current_hand_index += 1
-            
-            if self.current_hand_index >= len(self.player_hands):
-                # All player hands are done, deal dealer cards
-                done = True
-                self._deal_dealer()
-                reward = self._calculate_rewards()
-                self.bankroll += reward
-                self.game_over = True
-        
+            advance_to_next = True
+
         elif action == 2:  # Double
             if len(current_hand.cards) == 2:
-                # Double the bet
                 self.bets[self.current_hand_index] *= 2
-                current_bet *= 2
-                
-                # Deal one more card and stand
                 card = self.deck.deal()
                 current_hand.add_card(card)
                 self.counter.update_count(card)
-                
-                self.current_hand_index += 1
-                
-                if current_hand.is_busted():
-                    reward = -current_bet
-                    self.bankroll -= current_bet
-                    self._record_result("Bust after Double", reward)
-                
-                if self.current_hand_index >= len(self.player_hands):
-                    done = True
-                    if not current_hand.is_busted():
-                        self._deal_dealer()
-                        reward = self._calculate_rewards()
-                        self.bankroll += reward
-                    self.game_over = True
+                advance_to_next = True
             else:
-                # Can't double after hitting, treat as hit
+                # Can't double after hitting -- fall back to a plain hit.
                 card = self.deck.deal()
                 current_hand.add_card(card)
                 self.counter.update_count(card)
-                
                 if current_hand.is_busted():
-                    reward = -current_bet
-                    self.bankroll -= current_bet
-                    self.current_hand_index += 1
-                    self._record_result("Bust", reward)
-                    
-                    if self.current_hand_index >= len(self.player_hands):
-                        done = True
-                        self.game_over = True
-        
+                    advance_to_next = True
+
         elif action == 3:  # Split
-            if current_hand.can_split:
-                # Create a new hand
+            if (current_hand.can_split
+                    and len(current_hand.cards) == 2
+                    and len(self.player_hands) < 4):  # cap at 4 hands
+                current_bet = self.bets[self.current_hand_index]
+                # If splitting Aces, propagate the no-further-play rule onto
+                # both resulting hands.
+                is_ace_split = current_hand.cards[0].value == 'A'
+
                 new_hand = Hand()
                 new_hand.is_splitted = True
-                
-                # Move second card to new hand
+                # The current hand is also now a split hand -- this matters
+                # for blackjack detection. A,10 after a split is just 21,
+                # NOT a natural blackjack.
+                current_hand.is_splitted = True
+                if is_ace_split:
+                    current_hand.is_split_aces = True
+                    new_hand.is_split_aces = True
+
                 card = current_hand.cards.pop()
                 new_hand.add_card(card)
-                
-                # Recalculate values
+
                 current_hand._calculate_value()
                 current_hand._check_split()
-                
-                # Deal new cards to both hands
+
+                # Deal one card to each split hand.
                 card = self.deck.deal()
                 current_hand.add_card(card)
                 self.counter.update_count(card)
-                
+
                 card = self.deck.deal()
                 new_hand.add_card(card)
                 self.counter.update_count(card)
-                
-                # Add new hand and bet
+
                 self.player_hands.append(new_hand)
                 self.bets.append(current_bet)
+                # On a non-ace split, the player keeps playing the current
+                # (now first) split hand. On an ace split, the player gets
+                # no further actions -- step's "force STAND" guard will
+                # advance through both split-aces hands automatically.
             else:
-                # Can't split, treat as hit
+                # Can't split -- fall back to hit.
                 card = self.deck.deal()
                 current_hand.add_card(card)
                 self.counter.update_count(card)
-                
                 if current_hand.is_busted():
-                    reward = -current_bet
-                    self.bankroll -= current_bet
-                    self.current_hand_index += 1
-                    self._record_result("Bust", reward)
-                    
-                    if self.current_hand_index >= len(self.player_hands):
-                        done = True
-                        self.game_over = True
-        
-        # Update decks remaining
+                    advance_to_next = True
+
+        elif action == 4:  # Late surrender
+            # Allowed only on the first action of an un-split hand (2 cards,
+            # current_hand_index == 0, only one hand in play). Otherwise
+            # silently fall back to STAND (which is closest in spirit to
+            # surrender being unavailable).
+            if (len(current_hand.cards) == 2
+                    and not current_hand.is_splitted
+                    and self.current_hand_index == 0
+                    and len(self.player_hands) == 1):
+                current_hand.surrendered = True
+            advance_to_next = True
+
+        if advance_to_next:
+            self.current_hand_index += 1
+
         self.counter.update_decks_remaining(self.deck.cards_remaining())
-        
-        if done:
+
+        # All player hands played? Then resolve the round.
+        if self.current_hand_index >= len(self.player_hands):
+            done = True
+            self.game_over = True
+            # Only deal the dealer's hole + draws if at least one player
+            # hand is still live -- not busted AND not surrendered. If
+            # everyone busted or surrendered, the dealer keeps the bets
+            # without playing (and never reveals the hole).
+            if any(not h.is_busted() and not h.surrendered for h in self.player_hands):
+                self._deal_dealer()
+            reward = self._calculate_rewards()
+            self.bankroll += reward
             self.num_hands_played += 1
-        
-        return self._get_state(), reward, done
+            return self._get_state(), reward, True
+
+        return self._get_state(), 0, False
     
     def _deal_dealer(self):
         """
-        Deal cards to dealer according to rules (hit on soft 17)
+        Reveal the dealer's hole if not already revealed, then hit until
+        the hand totals 17+ (H17: hits soft 17).
         """
-        # Deal the dealer's second card
-        card = self.deck.deal()
-        self.dealer_hand.add_card(card)
-        self.counter.update_count(card)
-        
-        # Hit until 17 or higher
+        if not self.dealer_hole_dealt:
+            # Standard path: deal the hole now.
+            card = self.deck.deal()
+            self.dealer_hand.add_card(card)
+            self.counter.update_count(card)
+        else:
+            # The hole was already dealt during reset (US peek). The dealer
+            # didn't have a natural (otherwise the round would already be
+            # over), so the hole has been sitting face-down. Now reveal it.
+            self.counter.update_count(self.dealer_hand.cards[1])
+
+        # Hit until 17 or higher (H17: hit soft 17).
         while self.dealer_hand.value < 17 or (self.dealer_hand.value == 17 and self.dealer_hand.is_soft):
             card = self.deck.deal()
             self.dealer_hand.add_card(card)
             self.counter.update_count(card)
+
+        self.counter.update_decks_remaining(self.deck.cards_remaining())
     
     def _calculate_rewards(self):
         """
@@ -445,7 +499,10 @@ class BlackjackEnv:
             # Set to the current hand being processed
             self.current_hand_index = i
             
-            if hand.is_busted():
+            if hand.surrendered:
+                reward = -bet / 2.0  # forfeit half the bet
+                result = "Surrender"
+            elif hand.is_busted():
                 reward = -bet
                 result = "Bust"
             elif hand.is_blackjack and not self.dealer_hand.is_blackjack:
