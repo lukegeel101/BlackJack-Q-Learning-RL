@@ -22,7 +22,7 @@ Three agents play 200,000 hands of high-limit-table blackjack head-to-head:
   <a href="blackjack_results.mp4"><img src="blackjack_results_thumb.jpg" alt="Cumulative profit comparison" width="100%" /></a>
 </p>
 
-200,000 hands per agent, 8-deck H17 game, 3:2 blackjack, $50 base bet ramping up to $2,500 at high true counts. The flat-bet player bleeds slowly to the house edge. The counter pulls ahead at moderate counts. The neural net pulls ahead **more**, because it sees what no human counter can — the exact rank-by-rank distribution of every card left in the shoe.
+200,000 hands per agent, 8-deck H17 game, 3:2 blackjack, $50 base bet ramping up to $2,500 at high true counts. The flat-bet player bleeds slowly to the house edge. The counter pulls ahead at moderate counts. The neural net pulls ahead **more**, because it sees what no human counter can (unless you have a photographic memory haha) — the exact rank-by-rank distribution of every card left in the shoe.
 
 ---
 
