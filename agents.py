@@ -581,6 +581,11 @@ def load_dqn_net(checkpoint_path: str, device='cpu'):
             f"This usually means the checkpoint predates the 10/J/Q/K "
             f"collapse. Retrain with train_dqn.py and re-save.")
 
+    # Infer the hidden width from the first layer so checkpoints trained at
+    # any hidden_dim load correctly (backward compatible with the 128-wide
+    # checkpoints -- fc1.weight is (hidden_dim, INPUT_DIM)).
+    hidden_dim = int(fc1_w.shape[0]) if fc1_w is not None else 128
+
     has_value_head = any(k.startswith('value_head.') for k in state_dict)
     has_adv_head = any(k.startswith('adv_head.') for k in state_dict)
     if has_value_head and has_adv_head:
@@ -589,11 +594,11 @@ def load_dqn_net(checkpoint_path: str, device='cpu'):
         # QR-DQN dueling:  adv_head out = OUTPUT_DIM * N_QUANTILES.
         adv_w = state_dict['adv_head.weight']
         if adv_w.shape[0] == DuelingQNet.OUTPUT_DIM:
-            net = DuelingQNet().to(device)
+            net = DuelingQNet(hidden_dim=hidden_dim).to(device)
         else:
-            net = DuelingQRDQN().to(device)
+            net = DuelingQRDQN(hidden_dim=hidden_dim).to(device)
     else:
-        net = DQNNet().to(device)
+        net = DQNNet(hidden_dim=hidden_dim).to(device)
 
     net.load_state_dict(state_dict)
     return net

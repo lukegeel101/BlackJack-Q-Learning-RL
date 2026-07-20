@@ -454,6 +454,10 @@ def rl_train(net: DuelingQRDQN,
                 and args.save_path):
             net.eval()
             torch.save({'net': net.state_dict()}, args.save_path)
+            if args.snapshot_checkpoints:
+                base, ext = os.path.splitext(args.save_path)
+                snap = f"{base}_ep{episode+1}{ext}"
+                torch.save({'net': net.state_dict()}, snap)
             net.train()
             print(f"    [checkpoint saved at ep {episode+1:,} to {args.save_path}]")
 
@@ -473,6 +477,11 @@ def main():
     parser.add_argument('--epsilon-decay-episodes', type=int, default=2_000_000)
     parser.add_argument('--train-every', type=int, default=4)
     parser.add_argument('--warm-start-batches', type=int, default=3000)
+    parser.add_argument('--hidden-dim', type=int, default=128,
+                        help='width of the two shared hidden layers')
+    parser.add_argument('--snapshot-checkpoints', action='store_true',
+                        help='also save a per-episode snapshot alongside '
+                             'the rolling checkpoint (for eval of intermediates)')
     parser.add_argument('--save-path', type=str, default='dqn_agent.pt')
     parser.add_argument('--save-every', type=int, default=500_000,
                         help='checkpoint every N episodes (0 = only at end)')
@@ -491,8 +500,8 @@ def main():
           f"input={DuelingQRDQN.INPUT_DIM}, n_actions={DuelingQRDQN.OUTPUT_DIM}, "
           f"n_quantiles={DuelingQRDQN.N_QUANTILES}")
 
-    net = DuelingQRDQN().to(device)
-    target_net = DuelingQRDQN().to(device)
+    net = DuelingQRDQN(hidden_dim=args.hidden_dim).to(device)
+    target_net = DuelingQRDQN(hidden_dim=args.hidden_dim).to(device)
     target_net.load_state_dict(net.state_dict())
     opt = optim.Adam(net.parameters(), lr=args.lr)
 
