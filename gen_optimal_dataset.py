@@ -58,7 +58,7 @@ def _worker(args) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     import torch  # noqa: F401 -- imported for tensor type used by state_to_features
     from cardCounting import BlackjackEnv
     from agents import (basic_strategy_with_deviations, state_to_features,
-                        _valid_actions)
+                        _valid_actions, INPUT_DIM)
     from optimal_policy import evaluate_state, clear_caches
 
     random.seed(seed)
@@ -66,10 +66,16 @@ def _worker(args) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 
     env = BlackjackEnv(num_decks=8, min_bet=50, max_bet=50)
 
-    feats = np.zeros((n_states, NUM_FEATURES), dtype=np.float32)
+    # Feature width is whatever the current feature spec emits (34 today);
+    # never hardcode it or the assignment below silently mismatches.
+    feats = np.zeros((n_states, INPUT_DIM), dtype=np.float32)
     evs = np.full((n_states, ACTION_COUNT), np.nan, dtype=np.float32)
     mask = np.zeros((n_states, ACTION_COUNT), dtype=bool)
     opt = np.zeros(n_states, dtype=np.int8)
+    # Also record the basic+I18 action at each state so downstream offline
+    # evaluation can score basic+I18 (and any net-vs-basic hybrid) against
+    # the solver EVs without re-running the (slow) solver.
+    basic = np.zeros(n_states, dtype=np.int8)
 
     i = 0
     state = env.reset()
@@ -117,13 +123,14 @@ def _worker(args) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         for a, ev in action_evs.items():
             evs[i, a] = ev
         opt[i] = optimal_action
+        basic[i] = basic_strategy_with_deviations(state)
         i += 1
 
         # Step the env with the basic+I18 default action so the next state
         # distribution reflects realistic play (rather than e.g. always
         # hitting). Could also step with optimal_action -- we use the
         # default to stay aligned with how Agent 2 plays in deployment.
-        action_to_step = basic_strategy_with_deviations(state)
+        action_to_step = basic[i - 1]
         # The basic-strategy fallback can return SURRENDER on an illegal
         # state if our predicate is too generous; the env will silently
         # fall back to STAND for invalid surrenders, so just pass through.
@@ -148,7 +155,7 @@ def _worker(args) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
                   f"({rate:.0f}/s)", flush=True)
             last_report = now
 
-    return feats, evs, mask, opt
+    return feats, evs, mask, opt, basic
 
 
 def main():
@@ -197,6 +204,7 @@ def main():
     evs = np.concatenate([r[1] for r in results], axis=0)
     mask = np.concatenate([r[2] for r in results], axis=0)
     opt = np.concatenate([r[3] for r in results], axis=0)
+    basic = np.concatenate([r[4] for r in results], axis=0)
 
     print(f"\nDone in {elapsed/60:.1f} min "
           f"({args.num_states / max(elapsed, 1):.0f} states/s overall).")
@@ -216,7 +224,7 @@ def main():
     out_dir = os.path.dirname(os.path.abspath(args.out))
     os.makedirs(out_dir, exist_ok=True)
     np.savez(args.out, features=feats, ev_actions=evs,
-             valid_mask=mask, optimal=opt)
+             valid_mask=mask, optimal=opt, basic=basic)
     size_mb = os.path.getsize(args.out) / (1024 * 1024)
     print(f"\nSaved -> {args.out} ({size_mb:.1f} MB)")
 
