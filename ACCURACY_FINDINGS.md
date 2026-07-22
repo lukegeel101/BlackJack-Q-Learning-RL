@@ -139,22 +139,48 @@ it to the true count as a betting signal on **1.5M held-out hands**:
 | edge, **rank-matched** betting (identical bet multiset) | +1.147% | +1.169% |
 
 Rank-matched advantage of composition: **+$0.02/hand, 95% CI [−0.24, +0.26]** —
-indistinguishable from zero. The two betting correlations are equal to within
-noise and flip-flop across runs. **Composition-aware betting does not beat
-Hi-Lo.**
+indistinguishable from zero, using single-hand outcomes as the payoff.
 
-Why: for the *aggregate* "is this shoe good for me" question, the Hi-Lo count
-is an extremely efficient summary statistic (its betting correlation with true
-EV is ~0.97 in the literature). The full composition carries more information
-in principle (Hi-Lo mis-weights aces, etc.), but the residual is tiny and is
-completely swamped by single-hand outcome variance — undetectable even at 1.5M
-hands, and worth far less than the video's 2× headline implied. Composition
-helps where a *specific* remaining-card distribution flips a *specific* play
-decision (§3), not in bet sizing.
+But this is the wrong measurement: a single hand's result has std ~1.1 while
+the EV signal we're chasing has std ~0.018, so realized outcomes can't resolve
+the two signals even at millions of hands. The right benchmark is the **true
+per-round EV** of each shoe, estimated by Monte-Carlo replaying each exact
+composition thousands of times (`mc_true_ev.py`) -- this is how "betting
+correlation" is actually defined. Scored against 1,500 MC-EV-labeled shoes
+(`score_bet.py`):
 
-(`bet_value_net.pt` is the trained betting model; the deployable EV→bet ramp is
-approximate out-of-sample, which is why the comparison above is rank-matched —
-identical bets, allocation-only difference — rather than relying on the ramp.)
+| signal | betting corr (vs true EV) | EV-RMSE | edge% |
+|---|---:|---:|---:|
+| Hi-Lo true count | 0.700 | 0.0129 | 0.501 |
+| composition net, **under-trained** (700k hands, h64) | 0.668 | 0.0140 | 0.426 |
+| composition net, **trained extensively** (5M hands, h256) | **0.750** | **0.0120** | **0.568** |
+
+Two things become clear:
+
+1. The *original* betting net was **worse** than Hi-Lo -- it underfit. The
+   earlier "no edge" result was measuring an under-trained net with a metric
+   too noisy to see anything.
+2. **Trained more extensively (5M rounds + a wider net), the composition net
+   significantly beats Hi-Lo as a betting signal:** correlation 0.750 vs 0.700
+   (paired-bootstrap difference +0.045, 95% CI [+0.029, +0.061], P>0 = 100%),
+   and a lower EV-prediction RMSE. This is the ace/rank information Hi-Lo's
+   1-D count throws away, recovered from the full composition.
+
+The translation to realized **edge** is positive (+0.57% vs +0.50%, ~13%
+relative) but not individually significant at 1,500 shoes (95% CI on the edge
+gap includes 0) -- the edge is dominated by rare high-count shoes, which are
+sparse in the benchmark. So: composition is a *measurably better EV predictor*
+for betting; whether that few-percent edge is worth the complexity over Hi-Lo
+in dollars is not resolved without a much larger MC benchmark.
+
+Takeaway: the betting lever is real but small. Hi-Lo is ~0.97 efficient by
+construction; the composition net recovers most of the remaining gap, but that
+gap is worth thousandths of a bet per hand -- not the video's 2×.
+
+(`bet_value_net.pt` is the trained betting model; `mc_true_ev.py` builds the
+ground-truth benchmark and `score_bet.py` scores signals against it. The
+deployable EV→bet ramp is approximate out-of-sample, so the money comparison is
+rank-matched -- identical bets, allocation-only difference.)
 
 ## Recommendation
 

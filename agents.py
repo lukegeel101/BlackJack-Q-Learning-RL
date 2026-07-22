@@ -425,8 +425,11 @@ class BetValueNet(nn.Module):
 
 def load_bet_value_net(path, device='cpu'):
     ckpt = torch.load(path, map_location=device)
-    net = BetValueNet().to(device)
-    net.load_state_dict(ckpt['net'])
+    sd = ckpt['net']
+    # Infer hidden width from the first layer so any-width checkpoints load.
+    hidden = int(sd['fc1.weight'].shape[0])
+    net = BetValueNet(hidden_dim=hidden).to(device)
+    net.load_state_dict(sd)
     net.eval()
     ramp = ckpt.get('ramp', {'ev_lo': -0.01, 'ev_hi': 0.03})
     return net, ramp
