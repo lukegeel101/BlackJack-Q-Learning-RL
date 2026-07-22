@@ -27,6 +27,8 @@ from agents import (
     FlatBetBasicStrategyAgent,
     CountingBasicStrategyAgent,
     DQNCardCountingAgent,
+    bet_features_from_composition,
+    FEATURE_CARD_VALUES,
 )
 
 
@@ -78,14 +80,21 @@ def run_agent(agent,
         if pre_was_shuffled:
             pre_running = 0
             pre_decks = float(env.deck.num_decks)
+            pre_comp = {v: 4 * env.deck.num_decks for v in FEATURE_CARD_VALUES}
+            pre_remaining = env.deck.num_decks * 52
         else:
             pre_running = env.counter.running_count
             pre_decks = max(env.counter.decks_remaining, 0.5)
+            pre_comp = env.deck.get_card_count()
+            pre_remaining = env.deck.cards_remaining()
         pre_true_count = pre_running / pre_decks
 
         state = env.reset()
         # Inject the pre-deal count so agents bet on it.
         state['pre_true_count'] = pre_true_count
+        # Inject pre-deal composition betting features for composition bettors.
+        state['pre_bet_features'] = bet_features_from_composition(
+            pre_comp, pre_remaining, env.deck.num_decks * 52)
 
         bet = int(agent.get_bet(state))
         env.bets[0] = bet

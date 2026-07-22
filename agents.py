@@ -367,6 +367,115 @@ def count_based_bet(true_count: float, unit: int = 50, max_units: int = 50) -> i
 
 
 # ---------------------------------------------------------------------------
+# Composition-aware BETTING
+# ---------------------------------------------------------------------------
+#
+# A Hi-Lo true count is a 1-D, lossy compression of the shoe: it sums the
+# +1/-1 card tags and divides by decks remaining. Two shoes with the SAME
+# true count can have materially different actual EVs (e.g. ace-rich vs
+# low-card-rich). Since a counter's edge is mostly in the BET (sizing up
+# when the shoe is favorable), a model that sees the full rank composition
+# can, in principle, size bets on a strictly better estimate of the next
+# round's EV than the true count -- capturing the betting-correlation gap
+# Hi-Lo leaves on the table.
+#
+# BetValueNet regresses the realized per-unit result of the *upcoming*
+# round from the PRE-DEAL shoe composition. Its prediction is a
+# composition-conditional EV estimate used to drive the bet ramp.
+
+_INITIAL_TOTAL_CARDS_BET = 8 * 52  # 416 for the default 8-deck shoe
+BET_INPUT_DIM = len(FEATURE_CARD_VALUES) + 2  # 13 rank fractions + pen + remaining
+
+
+def bet_features_from_composition(card_count, cards_remaining,
+                                  total_cards=_INITIAL_TOTAL_CARDS_BET):
+    """Pre-deal betting features from the remaining-shoe composition.
+
+    13 per-rank fractions (P[next card is this rank]) + penetration
+    (0 fresh, ->1 at the cut card) + fraction of the shoe still unseen.
+    Deliberately does NOT include the Hi-Lo count: the net gets only the
+    raw composition, from which the count is derivable -- so any edge it
+    shows over the count is information the count throws away.
+    """
+    total = max(int(cards_remaining), 1)
+    feats = [card_count.get(v, 0) / total for v in FEATURE_CARD_VALUES]
+    feats.append(1.0 - total / total_cards)
+    feats.append(total / total_cards)
+    return np.array(feats, dtype=np.float32)
+
+
+class BetValueNet(nn.Module):
+    """Small MLP: pre-deal composition -> expected per-unit round result."""
+
+    INPUT_DIM = BET_INPUT_DIM
+
+    def __init__(self, hidden_dim: int = 64):
+        super().__init__()
+        self.fc1 = nn.Linear(self.INPUT_DIM, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x):
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+        h = F.relu(self.fc1(x))
+        h = F.relu(self.fc2(h))
+        return self.fc3(h).squeeze(-1)      # (B,)
+
+
+def load_bet_value_net(path, device='cpu'):
+    ckpt = torch.load(path, map_location=device)
+    net = BetValueNet().to(device)
+    net.load_state_dict(ckpt['net'])
+    net.eval()
+    ramp = ckpt.get('ramp', {'ev_lo': -0.01, 'ev_hi': 0.03})
+    return net, ramp
+
+
+def composition_based_bet(pred_ev, ramp, unit=50, max_units=50):
+    """Map a predicted per-unit EV to a bet, linearly ramping from 1 unit
+    at ev_lo to max_units at ev_hi (floored/capped). ev_lo/ev_hi are
+    calibrated at train time so the ramp's aggressiveness and average bet
+    are comparable to the Hi-Lo ramp."""
+    ev_lo, ev_hi = ramp['ev_lo'], ramp['ev_hi']
+    frac = (float(pred_ev) - ev_lo) / max(ev_hi - ev_lo, 1e-9)
+    units = 1.0 + frac * (max_units - 1)
+    units = int(round(min(max(units, 1.0), float(max_units))))
+    return unit * units
+
+
+class CompositionBettingAgent:
+    """A card counter whose PLAY is basic strategy + Illustrious-18 (same as
+    Agent 2), but whose BET is sized off a composition-aware EV estimate
+    (BetValueNet) instead of the Hi-Lo true count. Isolates the betting
+    lever -- the part of card counting that actually carries the edge."""
+
+    name = "Composition Betting"
+
+    def __init__(self, model_path, device=None, unit: int = 50,
+                 max_units: int = 50):
+        self.device = pick_device(device)
+        self.unit = unit
+        self.max_units = max_units
+        self.net, self.ramp = load_bet_value_net(model_path, device=self.device)
+
+    def predict_ev(self, state) -> float:
+        feats = state.get('pre_bet_features')
+        if feats is None:
+            return 0.0
+        with torch.no_grad():
+            t = torch.from_numpy(np.asarray(feats, dtype=np.float32)).to(self.device)
+            return float(self.net(t).item())
+
+    def get_bet(self, state) -> int:
+        return composition_based_bet(self.predict_ev(state), self.ramp,
+                                     self.unit, self.max_units)
+
+    def get_action(self, state) -> int:
+        return basic_strategy_with_deviations(state)
+
+
+# ---------------------------------------------------------------------------
 # Agent 1: hardcoded basic strategy, flat bet, ignores the count
 # ---------------------------------------------------------------------------
 
@@ -801,4 +910,10 @@ __all__ = [
     'ILLUSTRIOUS_18',
     'FEATURE_CARD_VALUES',
     'INPUT_DIM',
+    'BetValueNet',
+    'BET_INPUT_DIM',
+    'bet_features_from_composition',
+    'load_bet_value_net',
+    'composition_based_bet',
+    'CompositionBettingAgent',
 ]

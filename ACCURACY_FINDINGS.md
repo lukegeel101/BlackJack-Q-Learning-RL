@@ -116,6 +116,46 @@ the distilled model trades that variance for genuinely better decisions.
 - `optimal_dataset_34d.npz` — 20k exact-EV labeled states (34-dim features).
 - `dqn_agent.pt` — the original 1M-episode RL QR-DQN (unchanged).
 
+## Betting: does composition beat the Hi-Lo count? (the bigger lever)
+
+A card counter's edge is mostly in the **bet** (sizing up when the shoe is
+rich), not the play — play deviations are ~10–15% of the edge, bet sizing is
+the rest. But in this project **all agents share the same Hi-Lo bet ramp**;
+the DQN only ever changed *plays*. So the composition advantage was being
+spent on the small lever. The natural question: can a model that sees the full
+rank composition size bets better than the 1-D Hi-Lo true count?
+
+Setup (`gen_bet_dataset.py`, `train_bet_value.py`, `BetValueNet` +
+`CompositionBettingAgent` in `agents.py`): play flat-bet basic+I18 and record,
+per round, the **pre-deal** composition, the pre-deal Hi-Lo true count, and the
+realized per-unit outcome. Train a small net to predict the outcome from the
+composition — its prediction is a composition-conditional EV estimate. Compare
+it to the true count as a betting signal on **1.5M held-out hands**:
+
+| metric | Hi-Lo true count | composition net |
+|---|---:|---:|
+| betting correlation (corr with outcome) | +0.0137 | +0.0130 |
+| R² explaining outcome | +0.00012 | +0.00016 |
+| edge, **rank-matched** betting (identical bet multiset) | +1.147% | +1.169% |
+
+Rank-matched advantage of composition: **+$0.02/hand, 95% CI [−0.24, +0.26]** —
+indistinguishable from zero. The two betting correlations are equal to within
+noise and flip-flop across runs. **Composition-aware betting does not beat
+Hi-Lo.**
+
+Why: for the *aggregate* "is this shoe good for me" question, the Hi-Lo count
+is an extremely efficient summary statistic (its betting correlation with true
+EV is ~0.97 in the literature). The full composition carries more information
+in principle (Hi-Lo mis-weights aces, etc.), but the residual is tiny and is
+completely swamped by single-hand outcome variance — undetectable even at 1.5M
+hands, and worth far less than the video's 2× headline implied. Composition
+helps where a *specific* remaining-card distribution flips a *specific* play
+decision (§3), not in bet sizing.
+
+(`bet_value_net.pt` is the trained betting model; the deployable EV→bet ramp is
+approximate out-of-sample, which is why the comparison above is rank-matched —
+identical bets, allocation-only difference — rather than relying on the ramp.)
+
 ## Recommendation
 
 Promote `dqn_agent_distilled.pt` to Agent 3's play net (it is a drop-in:
