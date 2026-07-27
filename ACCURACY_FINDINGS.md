@@ -177,6 +177,29 @@ Takeaway: the betting lever is real but small. Hi-Lo is ~0.97 efficient by
 construction; the composition net recovers most of the remaining gap, but that
 gap is worth thousandths of a bet per hand -- not the video's 2×.
 
+### Pushing further: the betting net is at its accuracy plateau
+
+Scaling past the 5M/256 net gave nothing measurable:
+
+| configuration | betting corr (vs true EV) |
+|---|---:|
+| 700k hands, 64-wide (original) | 0.668 |
+| 5M hands, 128-wide | 0.746 |
+| 5M hands, 256-wide | 0.750 |
+| 5M, 128-wide, retuned (35 ep, batch 8192) | 0.752 |
+| 3-net ensemble (2×128 + 256, diverse seeds/arch) | 0.753 |
+
+More capacity, more epochs, and ensembling all land at ~0.752 — the members
+trained on the same data have correlated errors, so averaging adds nothing.
+This is a genuine ceiling, and it's mostly a *measurement* ceiling: the
+benchmark's MC noise (finite reps per shoe) caps the maximum observable
+correlation at ~0.78, which implies the net's correlation with the **true,
+noiseless** round EV is already ≈ 0.96 (vs Hi-Lo ≈ 0.90). The 15 composition
+features fully specify the pre-deal shoe, so there is no more information to
+give the model — it has captured essentially all of the learnable
+composition→EV signal. Beyond this point, "train more" yields sub-noise gains;
+the remaining limit is the game itself, not the model.
+
 (`bet_value_net.pt` is the trained betting model; `mc_true_ev.py` builds the
 ground-truth benchmark and `score_bet.py` scores signals against it. The
 deployable EV→bet ramp is approximate out-of-sample, so the money comparison is

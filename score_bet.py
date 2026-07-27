@@ -29,6 +29,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--mc', default='mc_ev.npz')
     p.add_argument('--models', nargs='+', default=[])
+    p.add_argument('--ensemble', nargs='+', default=[],
+                   help='score the average prediction of these nets as one signal')
     p.add_argument('--unit', type=int, default=50)
     p.add_argument('--max-units', type=int, default=50)
     a = p.parse_args()
@@ -49,10 +51,20 @@ def main():
     print(f"{'Hi-Lo true count':<30}{corr(tc, true_ev):>10.4f}"
           f"{np.sqrt(((tc_pred-true_ev)**2).mean()):>10.4f}{hilo_edge:>9.3f}")
 
-    for m in a.models:
-        net, _ = load_bet_value_net(m)
+    def predict(model_path):
+        net, _ = load_bet_value_net(model_path)
         with torch.no_grad():
-            pred = net(torch.from_numpy(feats.astype(np.float32))).numpy()
+            return net(torch.from_numpy(feats.astype(np.float32))).numpy()
+
+    jobs = [(m.split('/')[-1], m) for m in a.models]
+    if a.ensemble:
+        jobs.append((f'ENSEMBLE({len(a.ensemble)})', a.ensemble))
+
+    for label, spec in jobs:
+        if isinstance(spec, list):
+            pred = np.mean([predict(mm) for mm in spec], axis=0)
+        else:
+            pred = predict(spec)
         # rank-match onto the Hi-Lo bet multiset
         order = np.argsort(pred, kind='stable')
         cb = np.empty_like(hilo_bets); cb[order] = np.sort(hilo_bets)
@@ -67,7 +79,7 @@ def main():
             he = (hilo_bets[idx] * true_ev[idx]).sum() / hilo_bets[idx].sum() * 100
             diffs[k] = ce - he
         lo, hi = np.percentile(diffs, [2.5, 97.5])
-        print(f"{m.split('/')[-1]:<30}{corr(pred, true_ev):>10.4f}"
+        print(f"{label:<30}{corr(pred, true_ev):>10.4f}"
               f"{rmse:>10.4f}{edge:>9.3f}   vs Hi-Lo {edge-hilo_edge:+.3f}% "
               f"[{lo:+.3f},{hi:+.3f}]")
 
