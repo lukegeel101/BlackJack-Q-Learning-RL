@@ -436,15 +436,58 @@ def load_bet_value_net(path, device='cpu'):
 
 
 def composition_based_bet(pred_ev, ramp, unit=50, max_units=50):
-    """Map a predicted per-unit EV to a bet, linearly ramping from 1 unit
-    at ev_lo to max_units at ev_hi (floored/capped). ev_lo/ev_hi are
-    calibrated at train time so the ramp's aggressiveness and average bet
-    are comparable to the Hi-Lo ramp."""
+    """Map a predicted per-unit EV to a bet.
+
+    Two ramp styles are supported:
+
+    * **quantile-mapped** (preferred; `ramp['ev_edges']` present): the bet
+      SIZE DISTRIBUTION is copied exactly from the Hi-Lo ramp -- same min,
+      max, mean and total wagered -- but each bet level is assigned by
+      predicted-EV rank rather than by true count. This is the deployable
+      form of the rank-matched comparison: identical risk profile, better
+      allocation, so a profit difference reflects signal quality alone. It
+      also removes the free parameters a hand-tuned linear ramp needs
+      (which mis-calibrated out-of-sample and doubled the average bet).
+
+    * **linear** (legacy fallback): ramp linearly from 1 unit at `ev_lo`
+      to `max_units` at `ev_hi`.
+    """
+    ev = float(pred_ev)
+    edges = ramp.get('ev_edges')
+    if edges is not None:
+        tbl = ramp['ev_units']
+        i = int(np.searchsorted(np.asarray(edges, dtype=np.float64), ev,
+                                side='right')) - 1
+        i = max(0, min(i, len(tbl) - 1))
+        return unit * int(tbl[i])
     ev_lo, ev_hi = ramp['ev_lo'], ramp['ev_hi']
-    frac = (float(pred_ev) - ev_lo) / max(ev_hi - ev_lo, 1e-9)
+    frac = (ev - ev_lo) / max(ev_hi - ev_lo, 1e-9)
     units = 1.0 + frac * (max_units - 1)
     units = int(round(min(max(units, 1.0), float(max_units))))
     return unit * units
+
+
+def calibrate_quantile_ramp(pred_ev, hilo_bets, unit=50):
+    """Build a quantile-mapped ramp: reproduce the Hi-Lo bet distribution
+    exactly, but allocate the bet sizes by predicted-EV rank.
+
+    Returns {'ev_edges': ascending EV thresholds,
+             'ev_units': units for each threshold bucket}.
+    """
+    pred_ev = np.asarray(pred_ev, dtype=np.float64)
+    units = np.rint(np.asarray(hilo_bets, dtype=np.float64) / unit).astype(int)
+
+    # Give the largest Hi-Lo bets to the highest predicted EVs.
+    order = np.argsort(-pred_ev, kind='stable')
+    assigned = np.empty_like(units)
+    assigned[order] = np.sort(units)[::-1]
+
+    edges, tbl = [], []
+    for lv in np.unique(assigned):                      # ascending
+        edges.append(float(pred_ev[assigned == lv].min()))
+        tbl.append(int(lv))
+    edges[0] = -float('inf')                            # catch-all below
+    return {'ev_edges': edges, 'ev_units': tbl}
 
 
 class CompositionBettingAgent:
@@ -476,6 +519,81 @@ class CompositionBettingAgent:
 
     def get_action(self, state) -> int:
         return basic_strategy_with_deviations(state)
+
+
+# ---------------------------------------------------------------------------
+# Agent 4: both learned models in one player
+# ---------------------------------------------------------------------------
+
+class IntegratedCardCountingAgent:
+    """Both composition-aware models in a single player -- the culmination
+    of the two separate investigations:
+
+      * BET  -- sized by BetValueNet's composition-conditional EV estimate
+        (betting correlation 0.75 vs Hi-Lo's 0.70 against Monte-Carlo
+        ground-truth EV), mapped through a quantile ramp so the bet-size
+        DISTRIBUTION is identical to the Hi-Lo counter's. Same risk, same
+        average bet, better allocation.
+
+      * PLAY -- basic strategy + Illustrious-18 by default, with the
+        solver-distilled net (`dqn_agent_distilled.pt`) allowed to override
+        when it is at least `deviation_margin` better in exact EV. That net
+        is trained on expectimax EVs, so unlike the RL DQN its overrides
+        REDUCE regret vs basic+I18 (EV-loss 0.0011 vs 0.0016 held-out) on
+        the ~2.5% of hands where the exact composition makes basic wrong.
+
+    Both levers are the composition-aware version of what a professional
+    Hi-Lo counter does by hand.
+    """
+
+    name = "Integrated (composition bet + distilled play)"
+
+    def __init__(self,
+                 bet_model_path: str,
+                 play_model_path: str,
+                 device=None,
+                 unit: int = 50,
+                 max_units: int = 50,
+                 deviation_margin: float = 0.05):
+        self.device = pick_device(device)
+        self.unit = unit
+        self.max_units = max_units
+        self.bet_net, self.ramp = load_bet_value_net(bet_model_path,
+                                                     device=self.device)
+        # Reuse the hybrid play policy wholesale -- it already implements
+        # "basic+I18 unless the net is confidently better", and tracks the
+        # deviation counters.
+        self._play = DQNCardCountingAgent(model_path=play_model_path,
+                                          device=device, unit=unit,
+                                          max_units=max_units,
+                                          deviation_margin=deviation_margin)
+
+    @property
+    def decision_count(self):
+        return self._play.decision_count
+
+    @property
+    def deviation_count(self):
+        return self._play.deviation_count
+
+    def predict_ev(self, state) -> float:
+        feats = state.get('pre_bet_features')
+        if feats is None:
+            # No pre-deal composition injected: fall back to the Hi-Lo bet.
+            return None
+        with torch.no_grad():
+            t = torch.from_numpy(np.asarray(feats, dtype=np.float32)).to(self.device)
+            return float(self.bet_net(t).item())
+
+    def get_bet(self, state) -> int:
+        ev = self.predict_ev(state)
+        if ev is None:
+            tc = state.get('pre_true_count', state['true_count'])
+            return count_based_bet(tc, self.unit, self.max_units)
+        return composition_based_bet(ev, self.ramp, self.unit, self.max_units)
+
+    def get_action(self, state) -> int:
+        return self._play.get_action(state)
 
 
 # ---------------------------------------------------------------------------
@@ -918,5 +1036,7 @@ __all__ = [
     'bet_features_from_composition',
     'load_bet_value_net',
     'composition_based_bet',
+    'calibrate_quantile_ramp',
     'CompositionBettingAgent',
+    'IntegratedCardCountingAgent',
 ]

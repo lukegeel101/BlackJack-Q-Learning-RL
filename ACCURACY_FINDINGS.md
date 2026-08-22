@@ -205,6 +205,66 @@ ground-truth benchmark and `score_bet.py` scores signals against it. The
 deployable EV→bet ramp is approximate out-of-sample, so the money comparison is
 rank-matched -- identical bets, allocation-only difference.)
 
+## The integrated agent (both models in one player)
+
+`IntegratedCardCountingAgent` combines the two composition-aware models:
+
+* **Bet** — sized by `BetValueNet`'s composition-conditional EV estimate,
+  mapped through a **quantile ramp** (`calibrate_bet_ramp.py`) that copies the
+  Hi-Lo bet-size *distribution* exactly. Verified on 300k calibration hands:
+  mean bet $94.85 vs Hi-Lo's $94.85, same max, same total wagered. (The old
+  linear ev_lo/ev_hi ramp mis-calibrated out-of-sample and bet **1.83×** the
+  counter — inflating both edge and risk. The quantile ramp removes that free
+  parameter entirely, so the agent is risk-matched to the counter by
+  construction.)
+* **Play** — basic+I18, with the solver-distilled net overriding on the ~2.5%
+  of hands where it is ≥0.05 EV-units better.
+
+### Head-to-head, 8 seeds × 100k hands, common random numbers
+
+| agent | edge | $/hand | avg bet |
+|---|---:|---:|---:|
+| Flat-bet basic | −0.759% | −0.38 | $50 |
+| Hi-Lo counter (the professional) | +0.662% | +0.61 | $92 |
+| RL DQN card counting (original Agent 3) | +1.883% | +2.10 | **$111** |
+| **Integrated** (composition bet + distilled play) | **+1.022%** | +0.95 | $92 |
+
+Integrated − counter: **+0.360% edge** (95% CI [−0.149, +0.870]) at *identical*
+bet distribution — positive but, as always with money, not individually
+significant at this sample size.
+
+### Why the RL DQN still shows the biggest money edge
+
+Its avg bet is $111 vs everyone else's $92, and it is **not** risk-matched.
+Two candidate explanations, both tested:
+
+1. *Metric bias from doubles/splits?* **No.** Recomputing edge against the
+   true wagered amount (including doubled and split money) gives an inflation
+   factor of 1.142× for the DQN vs 1.131× for the counter — essentially
+   identical, so the denominator is not the story.
+2. *Shoe-flow / bet-timing.* **Yes.** Measured over 60k hands:
+
+   | agent | avg pre-deal TC | % hands at TC≥2 | cards/hand | hands/shoe |
+   |---|---:|---:|---:|---:|
+   | Hi-Lo counter | −0.220 | 13.1% | 5.34 | 65.0 |
+   | RL DQN | **+0.148** | **16.3%** | 5.35 | 64.9 |
+   | Integrated | −0.233 | 12.7% | 5.34 | 65.0 |
+
+   Same cards per hand and hands per shoe, but the DQN's deviations shift
+   *which count regimes its hands fall in*: it plays 24% more of its hands at
+   TC ≥ 2, so the same bet ramp puts more money out when the shoe is genuinely
+   favorable. (Hand-weighted average TC is negative for everyone because
+   low-count stretches consume more cards per hand and therefore generate more
+   hands.) That is a real effect in this heads-up simulation — but it is a
+   *side-effect of playing differently*, not better decision-making: the same
+   model's per-hand decisions are provably further from optimal (§2). It is
+   also not something a player controls at a real table with other players.
+
+So the three findings are consistent: the RL DQN plays **worse** per hand,
+bets **bigger** more often through an accidental shoe-flow effect, and thus
+books more money at higher variance; the integrated agent plays **better** per
+hand at **matched** risk.
+
 ## Recommendation
 
 Promote `dqn_agent_distilled.pt` to Agent 3's play net (it is a drop-in:
