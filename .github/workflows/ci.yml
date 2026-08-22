@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # cardCounting.py imports matplotlib.pyplot at module scope; force a
+      # headless backend so it works on a runner with no display.
+      MPLBACKEND: Agg
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # CPU-only wheel: ~200MB instead of ~2.5GB of CUDA payload we
+          # never use (everything here trains and runs on CPU).
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Smoke tests
+        run: python smoke_test.py
+
+      - name: Agent comparison (short)
+        run: python compare_integrated.py --hands 4000 --seeds 1 2

@@ -157,14 +157,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='optimal_dataset.npz')
     parser.add_argument('--save-path', type=str, default='dqn_agent.pt')
-    parser.add_argument('--epochs', type=int, default=80)
+    parser.add_argument('--epochs', type=int, default=250)
     parser.add_argument('--batch-size', type=int, default=512)
-    parser.add_argument('--lr', type=float, default=3e-4)
-    parser.add_argument('--weight-decay', type=float, default=1e-5)
+    # lr 3e-4 with the cosine schedule + a short patience used to early-stop
+    # before the net broke symmetry, leaving it collapsed to a near-constant
+    # (always-STAND) policy. 1e-3 with no weight decay learns the
+    # state-dependent EVs reliably; the cosine decay still anneals it down.
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--weight-decay', type=float, default=0.0)
     parser.add_argument('--val-frac', type=float, default=0.10)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--device', type=str, default=None)
-    parser.add_argument('--patience', type=int, default=15,
+    parser.add_argument('--patience', type=int, default=40,
                         help='Stop early if val EV gap fails to improve '
                              'for this many epochs (-1 = disabled).')
     args = parser.parse_args()

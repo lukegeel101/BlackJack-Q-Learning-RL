@@ -296,6 +296,26 @@ def polyak_update(target_net: nn.Module, online_net: nn.Module, tau: float):
             t.data.mul_(1.0 - tau).add_(o.data, alpha=tau)
 
 
+def save_ckpt(path, net, target_net, opt, episodes_done):
+    """Save a resumable checkpoint. Keeps the plain {'net': ...} key so
+    inference (load_dqn_net) still works, and adds optimizer/target/episode
+    state so training can be continued with --resume. This is what makes
+    chunked training possible in an ephemeral environment where a single
+    process only gets a short wall-clock slice."""
+    if not path:
+        return
+    was_training = net.training
+    net.eval()
+    torch.save({
+        'net': net.state_dict(),
+        'target_net': target_net.state_dict(),
+        'opt': opt.state_dict(),
+        'episodes_done': int(episodes_done),
+    }, path)
+    if was_training:
+        net.train()
+
+
 def rl_train(net: DuelingQRDQN,
              target_net: DuelingQRDQN,
              opt: optim.Optimizer,
@@ -306,9 +326,18 @@ def rl_train(net: DuelingQRDQN,
                        DuelingQRDQN.OUTPUT_DIM)
     accumulator = NStepAccumulator(args.n_step, args.gamma)
 
-    epsilon = args.epsilon_start
     eps_per_episode = (args.epsilon_start - args.epsilon_end) / max(
         args.epsilon_decay_episodes, 1)
+    # Global episode offset lets ε continue its schedule across chunked
+    # runs: ε is a pure function of episodes_done, so resuming mid-schedule
+    # (rather than restarting ε each chunk) needs only the episode counter.
+    episode_offset = getattr(args, '_episode_offset', 0)
+
+    def epsilon_at(global_ep):
+        return max(args.epsilon_end,
+                   args.epsilon_start - eps_per_episode * global_ep)
+
+    epsilon = epsilon_at(episode_offset)
 
     step_count = 0
     rewards_window = np.zeros(2000, dtype=np.float32)
@@ -316,10 +345,11 @@ def rl_train(net: DuelingQRDQN,
     skipped_peek_bj = 0
     print_every = max(1, args.episodes // 200)
     t0 = time.time()
+    max_seconds = getattr(args, 'max_seconds', 0)
 
     print(f"\nRL training: {args.episodes:,} episodes "
-          f"(ε {args.epsilon_start} -> {args.epsilon_end} "
-          f"over {args.epsilon_decay_episodes:,})")
+          f"(ε {epsilon:.3f} -> {args.epsilon_end} "
+          f"over {args.epsilon_decay_episodes:,}, offset={episode_offset:,})")
     print(f"  Dueling QR-DQN, N_QUANTILES={N_QUANTILES}, n-step={args.n_step}, "
           f"polyak_tau={args.polyak_tau}")
     print(f"  batch={args.batch_size}  buffer={args.buffer_size:,}  "
@@ -429,8 +459,9 @@ def rl_train(net: DuelingQRDQN,
         rewards_window[rew_ptr] = ep_reward
         rew_ptr = (rew_ptr + 1) % rewards_window.size
         rew_filled = min(rew_filled + 1, rewards_window.size)
-        if eps_per_episode > 0:
-            epsilon = max(args.epsilon_end, epsilon - eps_per_episode)
+        # ε is a pure function of the GLOBAL episode count so the schedule
+        # is continuous across chunked/resumed runs.
+        epsilon = epsilon_at(episode_offset + episode + 1)
 
         if (episode + 1) % print_every == 0:
             window_slice = (rewards_window[:rew_filled]
@@ -448,14 +479,28 @@ def rl_train(net: DuelingQRDQN,
                   f"skip-peek-BJ={skipped_peek_bj:,}")
 
         # Periodic checkpoint -- protects against the training process
-        # being killed before the final save.
+        # being killed before the final save. Saves resumable state.
+        global_ep = episode_offset + episode + 1
         if (args.save_every > 0
                 and (episode + 1) % args.save_every == 0
                 and args.save_path):
-            net.eval()
-            torch.save({'net': net.state_dict()}, args.save_path)
-            net.train()
-            print(f"    [checkpoint saved at ep {episode+1:,} to {args.save_path}]")
+            save_ckpt(args.save_path, net, target_net, opt, global_ep)
+            if args.snapshot_checkpoints:
+                base, ext = os.path.splitext(args.save_path)
+                save_ckpt(f"{base}_ep{global_ep}{ext}", net, target_net,
+                          opt, global_ep)
+            print(f"    [checkpoint saved at ep {global_ep:,} to {args.save_path}]")
+
+        # Wall-clock budget: in an ephemeral environment each process gets
+        # only a short slice, so stop cleanly and save resumable state that
+        # the next --resume chunk picks up.
+        if max_seconds and (time.time() - t0) >= max_seconds:
+            save_ckpt(args.save_path, net, target_net, opt, global_ep)
+            print(f"    [time budget {max_seconds}s reached at ep {global_ep:,}; "
+                  f"saved resumable state to {args.save_path}]")
+            return global_ep
+
+    return episode_offset + args.episodes
 
 
 def main():
@@ -473,13 +518,30 @@ def main():
     parser.add_argument('--epsilon-decay-episodes', type=int, default=2_000_000)
     parser.add_argument('--train-every', type=int, default=4)
     parser.add_argument('--warm-start-batches', type=int, default=3000)
+    parser.add_argument('--hidden-dim', type=int, default=128,
+                        help='width of the two shared hidden layers')
+    parser.add_argument('--snapshot-checkpoints', action='store_true',
+                        help='also save a per-episode snapshot alongside '
+                             'the rolling checkpoint (for eval of intermediates)')
     parser.add_argument('--save-path', type=str, default='dqn_agent.pt')
     parser.add_argument('--save-every', type=int, default=500_000,
                         help='checkpoint every N episodes (0 = only at end)')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--device', type=str, default=None,
                         help='override device (cpu/mps/cuda)')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='resume a resumable checkpoint (net+target+opt+'
+                             'episodes_done); skips warm-start, ε continues '
+                             'its schedule from episodes_done')
+    parser.add_argument('--init-from', type=str, default=None,
+                        help='initialize weights from an existing model '
+                             '(any {net:...} checkpoint) and keep training; '
+                             'skips warm-start, fresh optimizer/ε schedule')
+    parser.add_argument('--max-seconds', type=int, default=0,
+                        help='wall-clock budget for this chunk (0 = no limit); '
+                             'on hit, save resumable state and exit')
     args = parser.parse_args()
+    args.max_seconds = args.max_seconds  # surfaced onto args for rl_train
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -489,24 +551,41 @@ def main():
     print(f"Training on {device} (threads={torch.get_num_threads()})")
     print(f"Architecture: Dueling QR-DQN, "
           f"input={DuelingQRDQN.INPUT_DIM}, n_actions={DuelingQRDQN.OUTPUT_DIM}, "
-          f"n_quantiles={DuelingQRDQN.N_QUANTILES}")
+          f"n_quantiles={DuelingQRDQN.N_QUANTILES}, hidden={args.hidden_dim}")
 
-    net = DuelingQRDQN().to(device)
-    target_net = DuelingQRDQN().to(device)
+    net = DuelingQRDQN(hidden_dim=args.hidden_dim).to(device)
+    target_net = DuelingQRDQN(hidden_dim=args.hidden_dim).to(device)
     target_net.load_state_dict(net.state_dict())
     opt = optim.Adam(net.parameters(), lr=args.lr)
 
-    if args.warm_start_batches > 0:
+    args._episode_offset = 0
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device)
+        net.load_state_dict(ckpt['net'])
+        target_net.load_state_dict(ckpt.get('target_net', ckpt['net']))
+        if 'opt' in ckpt:
+            opt.load_state_dict(ckpt['opt'])
+        args._episode_offset = int(ckpt.get('episodes_done', 0))
+        print(f"Resumed {args.resume} at {args._episode_offset:,} episodes "
+              f"(skipping warm-start)")
+    elif args.init_from:
+        ckpt = torch.load(args.init_from, map_location=device)
+        sd = ckpt.get('net', ckpt) if isinstance(ckpt, dict) else ckpt
+        net.load_state_dict(sd)
+        target_net.load_state_dict(sd)
+        print(f"Initialized weights from {args.init_from} "
+              f"(skipping warm-start); continuing RL from a fresh ε schedule")
+    elif args.warm_start_batches > 0:
         warm_start(net, opt, device, num_batches=args.warm_start_batches,
                    batch_size=args.batch_size)
         target_net.load_state_dict(net.state_dict())
 
+    episodes_done = args._episode_offset
     if args.episodes > 0:
-        rl_train(net, target_net, opt, device, args)
+        episodes_done = rl_train(net, target_net, opt, device, args)
 
-    net.eval()
-    torch.save({'net': net.state_dict()}, args.save_path)
-    print(f"\nSaved DQN to {args.save_path}")
+    save_ckpt(args.save_path, net, target_net, opt, episodes_done)
+    print(f"\nSaved DQN to {args.save_path} (episodes_done={episodes_done:,})")
 
 
 if __name__ == '__main__':
