@@ -6,16 +6,20 @@ Short version: **it looked like it did, and it didn't.** Building the tools to c
 
 ## The headline numbers
 
-8 seeds × 100,000 hands per agent, common random numbers, 8-deck H17 shoe, $50 unit with a 1–50 bet spread. Edge is profit ÷ **actual money wagered**:
+24 seeds × 100,000 hands per agent (2.4M hands each), common random numbers, 8-deck H17 shoe, $50 unit with a 1–50 bet spread. Edge is profit ÷ **actual money wagered**:
 
 | Agent | Strategy | Edge | $/hand | Avg bet |
 |---|---|---:|---:|---:|
-| 1. Flat-bet Basic | Basic strategy, flat $50 | **−0.759%** | −$0.38 | $50 |
-| 2. Counting Basic | Basic + Hi-Lo + Illustrious-18 + bet ramp | **+0.662%** | +$0.61 | $92 |
-| 3. DQN Card Counting | Hi-Lo ramp, Dueling QR-DQN plays | **+1.883%** | +$2.10 | **$111** |
-| 4. **Integrated** | Composition-aware bet + solver-distilled play | **+1.022%** | +$0.95 | $92 |
+| 1. Flat-bet Basic | Basic strategy, flat $50 | **−0.581%** | −$0.29 | $50 |
+| 2. Counting Basic | Basic + Hi-Lo + Illustrious-18 + bet ramp | **+0.991%** | +$0.92 | $93 |
+| 3. DQN Card Counting | Hi-Lo ramp, Dueling QR-DQN plays | **+2.062%** | +$2.32 | **$113** |
+| 4. **Integrated** | Composition-aware bet + solver-distilled play | **+1.174%** | +$1.10 | $93 |
 
-Agent 3 books the most money — but **not because it plays better**. Its decisions are provably *further* from optimal than plain basic strategy; it wins by putting more money on the table (avg bet $111 vs $92) through a shoe-flow side effect described below. Agent 4 is risk-matched to the counter (identical bet-size distribution) and beats it by **+0.360% edge, 95% CI [−0.149, +0.870]** — a smaller but honestly earned advantage.
+Agent 3 books the most money — but **not because it plays better**. Its decisions are provably *further* from optimal than plain basic strategy; it wins by putting more money on the table (avg bet $113 vs $93) through a shoe-flow side effect described below.
+
+Agent 4 is risk-matched to the counter (identical bet-size distribution) and leads it by **+0.183% edge, 95% CI [−0.117, +0.482]** — positive, but **not statistically distinguishable from zero** (14 of 24 seeds positive, t ≈ 1.2).
+
+> An earlier 8-seed run of this same comparison put Agent 4's lead at +0.360%. Tripling the seeds halved it and left it inside the noise. That is regression to the mean, and it is the same trap the original +5.36% headline fell into — so the honest statement is that Agent 4's **measured accuracy** gains (§2–4 below, all statistically significant against ground truth) are real, while their **dollar** translation is too small to demonstrate at this sample size.
 
 Money results in blackjack are extremely noisy: per-seed edges for the same agent swing by more than a percentage point. That is why nearly every claim below is backed by a low-variance metric instead of a profit curve.
 
@@ -39,7 +43,7 @@ The video is one 200,000-hand run on a shared seed, and it reproduces exactly:
 
 > **Correction.** Earlier versions of this README reported +2.19% and +5.36% for Agents 2 and 3. The *net profits* were right, but those edge figures divided profit by flat-bet volume (hands × $50) instead of by the money actually wagered — which inflates any ramping agent by its bet multiplier (≈1.9× and ≈2.3× here). The corrected edges are above. `simulate.py` computes this correctly today.
 
-**One seed is not evidence.** This run is a favorable sample for Agent 3; across 8 seeds its advantage over the counter is both smaller and, as shown below, not attributable to better play. Treat the video as an illustration of the setup, not as a result.
+**One seed is not evidence.** This run is a favorable sample for Agent 3; across 24 seeds its advantage over the counter is both smaller and, as shown below, not attributable to better play. Treat the video as an illustration of the setup, not as a result.
 
 ---
 
@@ -153,7 +157,7 @@ pip install -r requirements.txt
 
 ```bash
 # 4-way comparison on common random numbers (the headline table)
-python compare_integrated.py --hands 100000 --seeds 1 2 3 4 5 6 7 8
+python compare_integrated.py --hands 100000 --seeds $(seq 1 24)
 
 # Original 3-way harness, single seed
 python simulate.py --hands 200000 --seed 42
