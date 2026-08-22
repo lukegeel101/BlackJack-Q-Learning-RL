@@ -265,6 +265,24 @@ bets **bigger** more often through an accidental shoe-flow effect, and thus
 books more money at higher variance; the integrated agent plays **better** per
 hand at **matched** risk.
 
+## Bonus bug: the original headline edges used the wrong denominator
+
+The README's published figures for the video run (shared seed 42, 200k hands)
+reproduce **exactly** in net profit — Agent 2 +$218,625, Agent 3 +$536,075 —
+but its *edge* percentages (+2.19%, +5.36%) did not. They were computed as
+profit ÷ (hands × $50), i.e. flat-bet volume, rather than profit ÷ money
+actually wagered. That inflates any ramping agent by its bet multiplier:
+
+| agent | published edge | correct edge | net profit | avg bet |
+|---|---:|---:|---:|---:|
+| 1. Flat-bet basic | −0.82% | −0.821% ✓ | −$82,050 | $50.00 |
+| 2. Counting basic | +2.19% | **+1.175%** | +$218,625 | $93.05 |
+| 3. DQN card counting | +5.36% | **+2.354%** | +$536,075 | $113.85 |
+
+Agent 1 was unaffected because it flat-bets, so the two denominators coincide.
+`simulate.py`'s `summarize()` computes this correctly today; the stale figures
+lived only in the README, which is now corrected.
+
 ## Recommendation
 
 Promote `dqn_agent_distilled.pt` to Agent 3's play net (it is a drop-in:
