@@ -220,18 +220,33 @@ rank-matched -- identical bets, allocation-only difference.)
 * **Play** — basic+I18, with the solver-distilled net overriding on the ~2.5%
   of hands where it is ≥0.05 EV-units better.
 
-### Head-to-head, 8 seeds × 100k hands, common random numbers
+### Head-to-head, 24 seeds × 100k hands, common random numbers
 
 | agent | edge | $/hand | avg bet |
 |---|---:|---:|---:|
-| Flat-bet basic | −0.759% | −0.38 | $50 |
-| Hi-Lo counter (the professional) | +0.662% | +0.61 | $92 |
-| RL DQN card counting (original Agent 3) | +1.883% | +2.10 | **$111** |
-| **Integrated** (composition bet + distilled play) | **+1.022%** | +0.95 | $92 |
+| Flat-bet basic | −0.581% | −0.29 | $50 |
+| Hi-Lo counter (the professional) | +0.991% | +0.92 | $93 |
+| RL DQN card counting (original Agent 3) | +2.062% | +2.32 | **$113** |
+| **Integrated** (composition bet + distilled play) | **+1.174%** | +1.10 | $93 |
 
-Integrated − counter: **+0.360% edge** (95% CI [−0.149, +0.870]) at *identical*
-bet distribution — positive but, as always with money, not individually
-significant at this sample size.
+Integrated − counter: **+0.183% edge** (95% CI [−0.117, +0.482]) at *identical*
+bet distribution — positive, but **not statistically distinguishable from
+zero**: 14 of 24 seeds positive, t ≈ 1.2.
+
+**This estimate shrank with more data.** An 8-seed run of the same comparison
+gave +0.360% (95% CI [−0.149, +0.870]). Tripling the seeds tightened the
+interval as expected (half-width 0.51 → 0.30) but pulled the point estimate
+toward zero rather than closing the interval around it — textbook regression
+to the mean, and precisely the failure mode this whole document exists to
+guard against. The 8-seed figure should not be quoted.
+
+The distinction that matters: the **accuracy** gains behind this agent are
+statistically significant against ground truth (play EV-loss 0.0011 vs basic's
+0.0016, §3; betting correlation +0.045 with CI [+0.029, +0.061], §4). Their
+**dollar** translation is simply too small to demonstrate at any sample size
+reachable here — which is the expected consequence of basic strategy already
+being ~99.8% of optimal and Hi-Lo already being a near-efficient betting
+statistic.
 
 ### Why the RL DQN still shows the biggest money edge
 
