@@ -1,8 +1,34 @@
-# Blackjack Q-Learning RL
+<div align="center">
 
-A deep-RL blackjack lab: three agents, an exact expectimax solver, and — the part I think is actually interesting — the measurement tooling to find out whether the neural net really plays better than a professional card counter, or just *looks* like it does.
+# Blackjack Intelligence Lab
 
-Short version: **it looked like it did, and it didn't.** Building the tools to check that, and then building models that genuinely do beat the counter, is what this repo is now about.
+### Can an AI that sees every card left in the shoe outperform a professional card counter?
+
+[![CI](https://github.com/lukegeel101/BlackJack-Q-Learning-RL/actions/workflows/ci.yml/badge.svg)](https://github.com/lukegeel101/BlackJack-Q-Learning-RL/actions/workflows/ci.yml)
+[![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-Dueling%20QR--DQN-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![GitHub stars](https://img.shields.io/github/stars/lukegeel101/BlackJack-Q-Learning-RL?style=flat&logo=github)](https://github.com/lukegeel101/BlackJack-Q-Learning-RL/stargazers)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Luke%20Geel-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/luke-geel/)
+
+**Deep reinforcement learning, exact expectimax evaluation, policy distillation, and composition-aware betting in a realistic blackjack simulator.**
+
+[Results](#the-headline-numbers) | [Watch the experiment](#watch-it-play) | [How it works](#how-it-works) | [Run it](#run-it-yourself) | [Accuracy report](ACCURACY_FINDINGS.md)
+
+<a href="blackjack_results.mp4">
+  <img src="blackjack_results_thumb.jpg" alt="Cumulative profit for flat-bet basic strategy, Hi-Lo card counting, and DQN card counting across 200,000 hands" width="100%" />
+</a>
+
+</div>
+
+This project compares four blackjack agents under shared shoe sequences, from flat-bet basic strategy to an integrated composition-aware system.
+The central question is not whether a neural network can produce an impressive profit curve, but whether it makes measurably better decisions than a strong human-card-counting baseline.
+
+The short answer is nuanced: **the original RL agent appeared to win for the wrong reason, while exact-EV policy distillation and composition-aware betting produced smaller but measurable accuracy gains.**
+The repository includes the simulator, trained checkpoints, exact solver, evaluation harnesses, CI smoke tests, and the full investigation that separated genuine policy quality from blackjack variance.
+
+> [!IMPORTANT]
+> The 200,000-hand chart above is a visualization, not the headline result.
+> The conclusions below use 24 shared seeds and low-variance comparisons against computed or Monte-Carlo ground truth.
 
 ## The headline numbers
 
